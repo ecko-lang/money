@@ -1,0 +1,151 @@
+# Tests for the money package - offline, deterministic (no ai/fs/net).
+#
+# The cases that matter are the ones where naive arithmetic loses money:
+# splitting an amount that does not divide evenly, and any use of floats. Every
+# amount here is a Decimal, and every split is asserted to sum back exactly.
+import std.test
+import "../main.ecko"
+m = main
+
+# --- construction -------------------------------------------------------------
+
+test.case("of and parse build the same amount", fn() {
+    a = m.of(decimal("10.50"), "USD")
+    b = m.parse("10.50", "USD")
+    test.ok(m.eq(a, b), "same amount")
+    test.eq(a.currency, "USD")
+    test.eq(m.to_string(a), "10.50 USD")
+})
+
+test.case("an amount is stored exactly, not as a float", fn() {
+    # 0.1 + 0.2 is the canonical float failure. On Decimal it is exactly 0.3.
+    total = m.add(m.parse("0.10", "USD"), m.parse("0.20", "USD"))
+    test.ok(m.eq(total, m.parse("0.30", "USD")), "0.10 + 0.20 == 0.30 exactly")
+})
+
+test.case("a currency code must be three letters", fn() {
+    test.eq(try { m.parse("1.00", "usd!") } catch (e) { get(e, "kind") }, "money")
+    test.eq(try { m.parse("1.00", "US") } catch (e) { get(e, "kind") }, "money")
+    # Lowercase is normalised rather than rejected.
+    test.eq(m.parse("1.00", "usd").currency, "USD")
+})
+
+# --- arithmetic ---------------------------------------------------------------
+
+test.case("add, sub, mul and neg", fn() {
+    a = m.parse("10.00", "USD")
+    b = m.parse("2.50", "USD")
+    test.eq(m.to_string(m.add(a, b)), "12.50 USD")
+    test.eq(m.to_string(m.sub(a, b)), "7.50 USD")
+    test.eq(m.to_string(m.mul(b, 3)), "7.50 USD")
+    test.eq(m.to_string(m.neg(b)), "-2.50 USD")
+    test.eq(m.to_string(m.abs_of(m.neg(b))), "2.50 USD")
+})
+
+test.case("mixing currencies is an error, not a silent conversion", fn() {
+    a = m.parse("10.00", "USD")
+    b = m.parse("10.00", "EUR")
+    test.eq(try { m.add(a, b) } catch (e) { get(e, "kind") }, "money")
+    test.eq(try { m.compare(a, b) } catch (e) { get(e, "kind") }, "money")
+})
+
+test.case("comparisons", fn() {
+    a = m.parse("10.00", "USD")
+    b = m.parse("2.50", "USD")
+    test.ok(m.gt(a, b), "10 > 2.50")
+    test.ok(m.lt(b, a), "2.50 < 10")
+    test.ok(m.eq(a, m.parse("10.00", "USD")), "equal")
+    test.ok(m.is_zero(m.parse("0.00", "USD")), "zero")
+    test.ok(m.is_negative(m.neg(b)), "negative")
+})
+
+# --- minor units ---------------------------------------------------------------
+
+test.case("minor units follow ISO 4217, not a blanket two", fn() {
+    test.eq(m.minor_units("USD"), 2)
+    test.eq(m.minor_units("EUR"), 2)
+    test.eq(m.minor_units("JPY"), 0)
+    test.eq(m.minor_units("KWD"), 3)
+    # An unknown code defaults to 2, which is the common case.
+    test.eq(m.minor_units("ZZZ"), 2)
+})
+
+test.case("to_minor and from_minor round-trip", fn() {
+    usd = m.parse("10.50", "USD")
+    test.eq(m.to_minor(usd), 1050)
+    test.ok(m.eq(m.from_minor(1050, "USD"), usd), "round-trip USD")
+    jpy = m.parse("1050", "JPY")
+    test.eq(m.to_minor(jpy), 1050)
+    test.ok(m.eq(m.from_minor(1050, "JPY"), jpy), "round-trip JPY has no subunits")
+    kwd = m.parse("1.234", "KWD")
+    test.eq(m.to_minor(kwd), 1234)
+})
+
+test.case("to_string renders the currency's own number of decimals", fn() {
+    test.eq(m.to_string(m.parse("1050", "JPY")), "1050 JPY")
+    test.eq(m.to_string(m.parse("1.234", "KWD")), "1.234 KWD")
+    test.eq(m.to_string(m.parse("5", "USD")), "5.00 USD")
+})
+
+# --- allocation ---------------------------------------------------------------
+
+test.case("split divides evenly when it can", fn() {
+    parts = m.split(m.parse("10.00", "USD"), 4)
+    test.eq(map(parts, m.to_string), ["2.50 USD", "2.50 USD", "2.50 USD", "2.50 USD"])
+})
+
+test.case("split never loses or invents a cent", fn() {
+    # 0.10 into 3 cannot divide evenly. The remainder must be handed out, not
+    # rounded away: 0.04 + 0.03 + 0.03 = 0.10.
+    parts = m.split(m.parse("0.10", "USD"), 3)
+    test.eq(map(parts, m.to_string), ["0.04 USD", "0.03 USD", "0.03 USD"])
+    test.ok(m.eq(m.sum(parts, "USD"), m.parse("0.10", "USD")), "sums back exactly")
+})
+
+test.case("allocate distributes by ratio, remainder first", fn() {
+    # The textbook case: 5 cents split 3:7 is 2 and 3, not 1.5 and 3.5.
+    parts = m.allocate(m.parse("0.05", "USD"), [3, 7])
+    test.eq(map(parts, m.to_string), ["0.02 USD", "0.03 USD"])
+    test.ok(m.eq(m.sum(parts, "USD"), m.parse("0.05", "USD")), "sums back exactly")
+})
+
+test.case("allocation sums back exactly across many awkward cases", fn() {
+    for amount in ["0.01", "0.07", "1.00", "9.99", "100.03"] {
+        for n in [2, 3, 6, 7] {
+            total = m.parse(amount, "USD")
+            parts = m.split(total, n)
+            test.eq(len(parts), n)
+            test.ok(m.eq(m.sum(parts, "USD"), total), "split {amount} by {n} sums back")
+        }
+    }
+})
+
+test.case("allocate handles a zero ratio and a zero amount", fn() {
+    parts = m.allocate(m.parse("1.00", "USD"), [1, 0, 1])
+    test.eq(map(parts, m.to_string), ["0.50 USD", "0.00 USD", "0.50 USD"])
+    zero = m.allocate(m.parse("0.00", "USD"), [1, 1])
+    test.ok(m.eq(m.sum(zero, "USD"), m.parse("0.00", "USD")), "zero stays zero")
+})
+
+test.case("splitting a negative amount still sums back", fn() {
+    total = m.parse("-0.10", "USD")
+    parts = m.split(total, 3)
+    test.ok(m.eq(m.sum(parts, "USD"), total), "negative sums back exactly")
+})
+
+test.case("invalid splits are rejected", fn() {
+    test.eq(try { m.split(m.parse("1.00", "USD"), 0) } catch (e) { get(e, "kind") }, "money")
+    test.eq(try { m.allocate(m.parse("1.00", "USD"), []) } catch (e) { get(e, "kind") }, "money")
+    test.eq(
+        try { m.allocate(m.parse("1.00", "USD"), [0, 0]) } catch (e) { get(e, "kind") },
+        "money",
+    )
+})
+
+# --- sum ----------------------------------------------------------------------
+
+test.case("sum adds a list, and needs a currency for the empty case", fn() {
+    items = [m.parse("1.10", "USD"), m.parse("2.20", "USD"), m.parse("3.30", "USD")]
+    test.eq(m.to_string(m.sum(items, "USD")), "6.60 USD")
+    test.eq(m.to_string(m.sum([], "USD")), "0.00 USD")
+})

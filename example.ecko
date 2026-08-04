@@ -1,0 +1,46 @@
+# money - where the cents go.
+#
+#   ecko example.ecko
+
+import "./main.ecko" as money
+
+price = money.parse("19.99", "USD")
+print("price          {money.to_string(price)}")
+print("three of them  {money.to_string(money.mul(price, 3))}")
+print("")
+
+print("floats lose money, Decimal does not:")
+print(
+    "  0.10 + 0.20 = {money.to_string(money.add(money.parse(\"0.10\", \"USD\"), money.parse(\"0.20\", \"USD\")))}",
+)
+print("")
+
+print("splitting 10 cents three ways - the remainder is handed out, not rounded away:")
+parts = money.split(money.parse("0.10", "USD"), 3)
+for p in parts {
+    print("  {money.to_string(p)}")
+}
+print("  sum: {money.to_string(money.sum(parts, \"USD\"))}")
+print("")
+
+print("a 3:7 revenue share of 5 cents:")
+for p in money.allocate(money.parse("0.05", "USD"), [3, 7]) {
+    print("  {money.to_string(p)}")
+}
+print("")
+
+print("not every currency has two decimal places:")
+for pair in [["1050", "JPY"], ["10.50", "USD"], ["1.234", "KWD"]] {
+    m = money.parse(pair[0], pair[1])
+    print(
+        "  {money.to_string(m)}  ({money.minor_units(pair[1])} places, {money.to_minor(m)} minor units)",
+    )
+}
+print("")
+
+print("mixing currencies fails rather than guessing a rate:")
+r = try {
+    money.add(money.parse("10.00", "USD"), money.parse("10.00", "EUR"))
+    "no error"
+} catch (e) { get(e, "message") }
+print("  {r}")
