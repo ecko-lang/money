@@ -25,7 +25,7 @@ import std.fmt
 
 ## The error raised for a bad currency, a currency mismatch, or an impossible
 ## division.
-export fn fail(message) {
+fn fail(message) {
     error({ kind: "money", message: message })
 }
 
@@ -111,7 +111,7 @@ export fn from_minor(units, code) {
 
 ## Both operands must be the same currency. Adding dollars to euros is not a
 ## rounding question, it is a missing exchange rate, so it fails.
-export fn same_currency(a, b, what) {
+fn same_currency(a, b, what) {
     unless a.currency == b.currency { fail("cannot {what} {a.currency} and {b.currency}") }
 }
 
