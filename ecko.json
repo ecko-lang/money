@@ -1,6 +1,6 @@
 {
   "module": "github.com/ecko-lang/money",
-  "version": "0.30.0",
+  "version": "0.37.0",
   "entrypoint": "main.ecko",
   "description": "Currency amounts on Decimal: exact arithmetic, ISO 4217 minor units, and allocation that never loses a cent. Pure - no capabilities.",
   "author": "Sean Nieuwoudt <sean@underwulf.com>",
