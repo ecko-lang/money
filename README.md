@@ -32,8 +32,8 @@ money.allocate(total, [3, 7])        # a 3:7 share, to the cent
 
 | function | what it does |
 |---|---|
-| `of(decimal, code)` | an amount from a Decimal |
-| `parse(text, code)` | an amount from a string |
+| `of(decimal, code, rounding = false)` | an amount from a Decimal |
+| `parse(text, code, rounding = false)` | an amount from a string |
 | `zero(code)` | zero in a currency |
 | `from_minor(units, code)` | `1050` with USD becomes `10.50` |
 | `to_minor(m)` | `10.50 USD` becomes `1050` |
@@ -73,8 +73,16 @@ refunds and revenue shares depend on. `allocate($0.05, [3, 7])` is `0.02` and
 `0.03`: as close to 3:7 as whole cents allow, and still five cents in total.
 
 **Not every currency has two decimal places.** Yen has none, Kuwaiti dinar has
-three. Assuming two is the classic bug - it makes yen a hundred times too small.
-Unknown codes default to two.
+three, the Chilean UF has four. Assuming two is the classic bug - it makes yen a
+hundred times too small. The package knows every active ISO 4217 code and
+refuses one it does not know, rather than guessing two.
+
+**An amount never has more decimal places than its currency.** `parse("12.345",
+"USD")` is refused with a `money` error instead of being kept and rounded later,
+out of sight, the first time it is printed or converted. When rounding is what
+you mean, say so: `parse("12.345", "USD", rounding: true)` is `12.35`, rounding
+half away from zero. Arithmetic in between (`mul` by a tax rate) may carry extra
+places; `to_string` and `to_minor` round those at the end.
 
 **Mixing currencies raises rather than converting.** Adding dollars to euros is
 not a rounding question, it is a missing exchange rate. There are no rates here:

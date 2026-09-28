@@ -66,8 +66,6 @@ test.case("minor units follow ISO 4217, not a blanket two", fn() {
     test.eq(m.minor_units("EUR"), 2)
     test.eq(m.minor_units("JPY"), 0)
     test.eq(m.minor_units("KWD"), 3)
-    # An unknown code defaults to 2, which is the common case.
-    test.eq(m.minor_units("ZZZ"), 2)
 })
 
 test.case("to_minor and from_minor round-trip", fn() {
@@ -148,4 +146,51 @@ test.case("sum adds a list, and needs a currency for the empty case", fn() {
     items = [m.parse("1.10", "USD"), m.parse("2.20", "USD"), m.parse("3.30", "USD")]
     test.eq(m.to_string(m.sum(items, "USD")), "6.60 USD")
     test.eq(m.to_string(m.sum([], "USD")), "0.00 USD")
+})
+
+# --- precision at the boundary ------------------------------------------------
+#
+# An amount enters the package through parse or of. One with more decimal places
+# than its currency has used to be kept and rounded later, out of sight, the
+# first time it was printed or converted: parse("12.345", "USD") read back as
+# 12.35. That is refused now, and rounding is something you ask for.
+
+test.case("parse refuses more decimal places than the currency has", fn() {
+    test.eq(try { m.parse("12.345", "USD") } catch (e) { get(e, "kind") }, "money")
+    test.eq(try { m.parse("12.5", "JPY") } catch (e) { get(e, "kind") }, "money")
+    test.eq(try { m.of(decimal("12.345"), "USD") } catch (e) { get(e, "kind") }, "money")
+    msg = try { m.parse("12.345", "USD") } catch (e) { get(e, "message") }
+    test.ok(contains(msg, "USD"), "names the currency: {msg}")
+    test.ok(contains(msg, "rounding"), "says how to round on purpose: {msg}")
+})
+
+test.case("parse rounds only when asked, half away from zero", fn() {
+    test.eq(m.to_string(m.parse("12.345", "USD", rounding: true)), "12.35 USD")
+    test.eq(m.to_string(m.parse("12.5", "JPY", rounding: true)), "13 JPY")
+    test.eq(m.to_string(m.parse("-12.345", "USD", rounding: true)), "-12.35 USD")
+})
+
+test.case("an amount within the currency's precision is accepted", fn() {
+    test.eq(m.to_string(m.parse("1.234", "KWD")), "1.234 KWD")
+    test.eq(m.to_string(m.parse("10", "USD")), "10.00 USD")
+    test.eq(m.to_string(m.parse("7", "JPY")), "7 JPY")
+})
+
+test.case("an unknown currency code is refused", fn() {
+    test.eq(try { m.parse("1.00", "XXX") } catch (e) { get(e, "kind") }, "money")
+    test.eq(try { m.parse("1.00", "ABC") } catch (e) { get(e, "kind") }, "money")
+    test.eq(try { m.minor_units("ABC") } catch (e) { get(e, "kind") }, "money")
+})
+
+test.case("every ISO 4217 minor unit is known, not assumed to be two", fn() {
+    test.eq(m.minor_units("CHF"), 2)
+    test.eq(m.minor_units("CLF"), 4)
+    test.eq(m.minor_units("UYW"), 4)
+    test.eq(m.minor_units("UYI"), 0)
+    test.eq(m.minor_units("clp"), 0)
+})
+
+test.case("arithmetic may carry extra precision; it is rounded on the way out", fn() {
+    tax = m.mul(m.parse("10.00", "USD"), decimal("0.0825"))
+    test.eq(m.to_string(tax), "0.83 USD")
 })
