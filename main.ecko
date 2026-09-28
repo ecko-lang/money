@@ -202,7 +202,7 @@ export fn allocate(m, ratios) {
     mut shares = []
     mut allocated = 0
     for r in ratios {
-        share = units * r / total_ratio
+        share = units * r // total_ratio
         shares = push(shares, share)
         allocated = allocated + share
     }
