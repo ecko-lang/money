@@ -23,19 +23,40 @@
 
 import std.fmt
 
-## The error raised for a bad currency, a currency mismatch, or an impossible
-## division.
-fn fail(message) {
-    error({ kind: "money", message: message })
+# --- errors -------------------------------------------------------------------
+
+# A failure caused by the data: a bad or unknown currency, two currencies that
+# do not match, an amount finer than its currency allows.
+fn fail(reason, message) {
+    error({ kind: "money", reason: reason, message: message })
+}
+
+# A programmer mistake, raised at the exported function that was called wrong.
+fn bug(message) {
+    error({ kind: "bug", reason: "bad_argument", message: message })
+}
+
+fn exact_number(x) = type_of(x) == "int" or type_of(x) == "decimal"
+
+fn is_amount(x) = type_of(x) == "map" and
+    type_of(get(x, "amount")) == "decimal" and
+    type_of(get(x, "currency")) == "string" and
+    has(MINOR_UNITS, x.currency)
+
+# Refuse anything that is not an amount this package made.
+fn check(m, fname) {
+    unless is_amount(m) {
+        bug("money.{fname}: expected an amount from money.of or money.parse, got {m}")
+    }
 }
 
 # --- currencies ---------------------------------------------------------------
 
-## Every active ISO 4217 currency and its number of decimal places. Assuming
-## two for a code this does not know was the classic bug it replaced: it makes
-## yen a hundred times too small and Kuwaiti dinar ten times too large, and it
-## quietly accepted a code that is not a currency at all. Built once, here, not
-## on every lookup.
+# Every active ISO 4217 currency and its number of decimal places. Assuming
+# two for a code this does not know was the classic bug it replaced: it makes
+# yen a hundred times too small and Kuwaiti dinar ten times too large, and it
+# quietly accepted a code that is not a currency at all. Built once, here, not
+# on every lookup.
 MINOR_UNITS = {
     AED: 2,
     AFN: 2,
@@ -208,189 +229,395 @@ MINOR_UNITS = {
     ZWL: 2,
 }
 
-## The ISO 4217 table: currency code -> decimal places.
+## The ISO 4217 table this package knows: a map from currency code to its
+## number of decimal places.
+##
+## example:
+##   money.minor_unit_table().KWD   # 3
 export fn minor_unit_table() = MINOR_UNITS
 
-## How many decimal places this currency uses. A code that is not an active
-## ISO 4217 currency is refused rather than guessed at.
+## How many decimal places a currency uses: 2 for USD, 0 for JPY, 3 for KWD.
+##
+## The code is normalised first, so `"usd"` works. A code that is not an
+## active ISO 4217 currency is refused rather than assumed to have two.
+##
+## errors: `money`/`bad_currency` when the code is not three letters;
+## `money`/`unknown_currency` when it is not an ISO 4217 currency; `bug` when
+## `code` is not a string.
+##
+## example:
+##   money.minor_units("JPY")   # 0
 export fn minor_units(code) {
-    c = normalize_code(code)
+    c = normalize(code, "minor_units")
     found = get(MINOR_UNITS, c)
-    if is_null(found) { fail("'{c}' is not an ISO 4217 currency code") }
+    if is_null(found) {
+        fail("unknown_currency", "money.minor_units: '{c}' is not an ISO 4217 currency code")
+    }
     found
 }
 
-## Uppercase a currency code and check its shape.
-export fn normalize_code(code) {
-    up = upper(string(code))
-    unless len(chars(up)) == 3 { fail("a currency code must be three letters, got '{code}'") }
-    unless all(chars(up), fn(c) c >= "A" and c <= "Z") {
-        fail("a currency code must be letters only, got '{code}'")
+fn normalize(code, fname) {
+    unless type_of(code) == "string" {
+        bug("money.{fname}: a currency code must be a string, got {code}")
+    }
+    up = upper(code)
+    unless len(chars(up)) == 3 and all(chars(up), fn(c) c >= "A" and c <= "Z") {
+        fail("bad_currency", "money.{fname}: a currency code must be three letters, got '{code}'")
     }
     up
 }
 
+## The code uppercased, once its shape is checked. It does not check that the
+## code is a known currency; `minor_units` does.
+##
+## errors: `money`/`bad_currency` when the code is not three letters; `bug`
+## when `code` is not a string.
+##
+## example:
+##   money.normalize_code("eur")   # "EUR"
+export fn normalize_code(code) = normalize(code, "normalize_code")
+
 # --- construction --------------------------------------------------------------
 
-## An amount from a Decimal and a currency code. An amount with more decimal
-## places than the currency has (`12.345` USD) is refused, because keeping it
-## would round it later, out of sight; pass `rounding: true` to round it here,
-## half away from zero.
-export fn of(amount, code, rounding = false) {
-    c = normalize_code(code)
-    places = minor_units(c)
+fn places_of(c, fname) {
+    found = get(MINOR_UNITS, c)
+    if is_null(found) {
+        fail("unknown_currency", "money.{fname}: '{c}' is not an ISO 4217 currency code")
+    }
+    found
+}
+
+fn build(amount, code, rounding, fname) {
+    c = normalize(code, fname)
+    places = places_of(c, fname)
+    value = match type_of(amount) {
+        "decimal" => amount
+        "int" => decimal(amount)
+        "string" => try { decimal(amount) } catch (e) { fail("bad_amount", "money.{fname}: '{amount}' is not a number") }
+        "float" => bug("money.{fname}: the amount must be a Decimal, an Int or a string, got the float {amount} - write {amount}m")
+        _ => bug("money.{fname}: the amount must be a Decimal, an Int or a string, got {amount}")
+    }
     scale = decimal(pow(10, places))
-    units = decimal(amount) * scale
+    units = value * scale
     whole = decimal(round(units))
     if units == whole {
-        { amount: decimal(amount), currency: c }
+        { amount: value, currency: c }
     } else if rounding {
         { amount: whole / scale, currency: c }
     } else {
         fail(
-            "{amount} has more decimal places than {c} allows ({places}) - pass rounding: true to round it",
+            "too_precise",
+            "money.{fname}: {amount} has more decimal places than {c} allows ({places}) - pass rounding: true to round it",
         )
     }
 }
 
-## An amount from a string: `parse("19.99", "USD")`. Refused, like `of`, when it
-## has more decimal places than the currency; `rounding: true` rounds it.
-export fn parse(text, code, rounding = false) {
-    of(decimal(string(text)), code, rounding: rounding)
-}
+## An amount from a Decimal (or an Int) and a currency code.
+##
+## An amount with more decimal places than the currency has (`12.345` USD) is
+## refused, because keeping it would round it later, out of sight; pass
+## `rounding: true` to round it here, half away from zero.
+##
+## errors: `money`/`too_precise` when the amount is finer than the currency and
+## `rounding` is false; `money`/`bad_currency` or `money`/`unknown_currency` for
+## the code; `bug` when the amount is a Float or not a number.
+##
+## example:
+##   money.of(19.99m, "USD")   # { amount: 19.99, currency: "USD" }
+export fn of(amount, code, rounding = false) = build(amount, code, rounding, "of")
+
+## An amount from a string such as `"19.99"`. Refused, like `of`, when it has
+## more decimal places than the currency; `rounding: true` rounds it.
+##
+## errors: `money`/`bad_amount` when the text is not a number;
+## `money`/`too_precise`, `money`/`bad_currency` and `money`/`unknown_currency`
+## as for `of`.
+##
+## example:
+##   money.parse("12.345", "USD", rounding: true)   # 12.35 USD
+export fn parse(text, code, rounding = false) = build(
+    if type_of(text) == "float" { text } else { string(text) },
+    code,
+    rounding,
+    "parse",
+)
 
 ## Zero in the given currency.
-export fn zero(code) = of(decimal(0), code)
+##
+## errors: `money`/`bad_currency` or `money`/`unknown_currency` for the code.
+##
+## example:
+##   money.to_string(money.zero("JPY"))   # "0 JPY"
+export fn zero(code) = build(0, code, false, "zero")
 
-## The amount as an integer count of minor units: 10.50 USD -> 1050.
+## The amount as an Int count of minor units: 10.50 USD is 1050.
+##
+## An amount carrying extra places from `mul` is rounded half away from zero,
+## in decimal.
+##
+## errors: `bug` when `m` is not an amount.
+##
+## example:
+##   money.to_minor(money.parse("10.50", "USD"))   # 1050
 export fn to_minor(m) {
+    check(m, "to_minor")
     # `round` on a Decimal is exact and takes halves away from zero, which is
     # what money wants; it never routes through a float.
-    round(m.amount * decimal(pow(10, minor_units(m.currency))))
+    round(m.amount * decimal(pow(10, MINOR_UNITS[m.currency])))
 }
 
-## An amount from a count of minor units: 1050 with USD -> 10.50.
+## An amount from an Int count of minor units: 1050 with USD is 10.50.
+##
+## errors: `money`/`bad_currency` or `money`/`unknown_currency` for the code;
+## `bug` when `units` is not an Int.
+##
+## example:
+##   money.to_string(money.from_minor(1050, "USD"))   # "10.50 USD"
 export fn from_minor(units, code) {
-    normalized = normalize_code(code)
-    of(decimal(units) / decimal(pow(10, minor_units(normalized))), normalized)
+    unless type_of(units) == "int" {
+        bug("money.from_minor: units must be an Int count of minor units, got {units}")
+    }
+    c = normalize(code, "from_minor")
+    build(decimal(units) / decimal(pow(10, places_of(c, "from_minor"))), c, false, "from_minor")
 }
 
 # --- arithmetic ---------------------------------------------------------------
 
-## Both operands must be the same currency. Adding dollars to euros is not a
-## rounding question, it is a missing exchange rate, so it fails.
-fn same_currency(a, b, what) {
-    unless a.currency == b.currency { fail("cannot {what} {a.currency} and {b.currency}") }
+# Both operands must be the same currency. Adding dollars to euros is not a
+# rounding question, it is a missing exchange rate, so it fails.
+fn same_currency(a, b, fname) {
+    check(a, fname)
+    check(b, fname)
+    unless a.currency == b.currency {
+        fail(
+            "currency_mismatch",
+            "money.{fname}: cannot combine {a.currency} and {b.currency} - there is no exchange rate here",
+        )
+    }
 }
 
-## a + b.
+## The sum of two amounts in the same currency.
+##
+## errors: `money`/`currency_mismatch` when the currencies differ; `bug` when
+## either is not an amount.
+##
+## example:
+##   money.add(money.parse("0.10", "USD"), money.parse("0.20", "USD"))   # 0.30 USD
 export fn add(a, b) {
     same_currency(a, b, "add")
     { amount: a.amount + b.amount, currency: a.currency }
 }
 
-## a - b.
+## `a` minus `b`, both in the same currency.
+##
+## errors: `money`/`currency_mismatch` when the currencies differ; `bug` when
+## either is not an amount.
 export fn sub(a, b) {
-    same_currency(a, b, "subtract")
+    same_currency(a, b, "sub")
     { amount: a.amount - b.amount, currency: a.currency }
 }
 
-## An amount scaled by a plain number.
+## The amount scaled by an Int or a Decimal factor.
+##
+## The result may carry more places than the currency (`mul` by a tax rate);
+## `to_string` and `to_minor` round it at the end, while `split` and `allocate`
+## refuse it until it is rounded with `of(m.amount, m.currency, rounding: true)`.
+##
+## errors: `bug` when `m` is not an amount or `factor` is a Float or not a number.
+##
+## example:
+##   money.to_string(money.mul(money.parse("10.00", "USD"), 0.0825m))   # "0.83 USD"
 export fn mul(m, factor) {
+    check(m, "mul")
+    unless exact_number(factor) {
+        bug(
+            "money.mul: factor must be an Int or a Decimal, got {factor} - write a Decimal such as 0.1m",
+        )
+    }
     { amount: m.amount * decimal(factor), currency: m.currency }
 }
 
-## The amount negated.
-export fn neg(m) = { amount: decimal(0) - m.amount, currency: m.currency }
+## The amount with its sign flipped.
+##
+## errors: `bug` when `m` is not an amount.
+export fn neg(m) {
+    check(m, "neg")
+    { amount: decimal(0) - m.amount, currency: m.currency }
+}
 
 ## The amount without its sign.
-export fn abs_of(m) = if m.amount < decimal(0) { neg(m) } else { m }
+##
+## errors: `bug` when `m` is not an amount.
+export fn abs_of(m) {
+    check(m, "abs_of")
+    if m.amount < decimal(0) { neg(m) } else { m }
+}
 
-## The total of a list. `code` gives the currency for the empty case, where
-## there is nothing to infer it from.
+## The total of a list of amounts. `code` names the currency, which is what
+## the empty list sums to.
+##
+## errors: `money`/`currency_mismatch` when an item is in another currency;
+## `bug` when `items` is not a list or an item is not an amount.
+##
+## example:
+##   money.to_string(money.sum([], "USD"))   # "0.00 USD"
 export fn sum(items, code) {
-    mut total = zero(code)
+    unless type_of(items) == "list" {
+        bug("money.sum: items must be a list of amounts, got {items}")
+    }
+    mut total = build(0, code, false, "sum")
     for item in items {
-        total = add(total, item)
+        same_currency(total, item, "sum")
+        total = { amount: total.amount + item.amount, currency: total.currency }
     }
     total
 }
 
 # --- comparison ----------------------------------------------------------------
 
-## -1, 0 or 1. Both must be the same currency.
-export fn compare(a, b) {
-    same_currency(a, b, "compare")
+fn cmp(a, b, fname) {
+    same_currency(a, b, fname)
     if a.amount < b.amount { return -1 }
     if a.amount > b.amount { return 1 }
     0
 }
 
-## a == b.
-export fn eq(a, b) = compare(a, b) == 0
+## -1, 0 or 1 as `a` is less than, equal to or greater than `b`.
+##
+## errors: `money`/`currency_mismatch` when the currencies differ; `bug` when
+## either is not an amount.
+export fn compare(a, b) = cmp(a, b, "compare")
 
-## a < b.
-export fn lt(a, b) = compare(a, b) < 0
+## Whether two amounts in the same currency are equal. `1.0` and `1.00` USD are.
+##
+## errors: as for `compare`.
+export fn eq(a, b) = cmp(a, b, "eq") == 0
 
-## a > b.
-export fn gt(a, b) = compare(a, b) > 0
+## Whether `a` is less than `b`.
+##
+## errors: as for `compare`.
+export fn lt(a, b) = cmp(a, b, "lt") < 0
 
-## Is the amount exactly zero?
-export fn is_zero(m) = m.amount == decimal(0)
+## Whether `a` is greater than `b`.
+##
+## errors: as for `compare`.
+export fn gt(a, b) = cmp(a, b, "gt") > 0
 
-## Is the amount below zero?
-export fn is_negative(m) = m.amount < decimal(0)
+## Whether the amount is exactly zero.
+##
+## errors: `bug` when `m` is not an amount.
+export fn is_zero(m) {
+    check(m, "is_zero")
+    m.amount == decimal(0)
+}
+
+## Whether the amount is below zero.
+##
+## errors: `bug` when `m` is not an amount.
+export fn is_negative(m) {
+    check(m, "is_negative")
+    m.amount < decimal(0)
+}
 
 # --- allocation ----------------------------------------------------------------
 
-## Split into `n` parts that sum back to the original exactly.
+## `n` parts that sum back to the original exactly, the remainder going one
+## minor unit at a time to the first parts.
+##
+## errors: `money`/`too_precise` when the amount has more places than its
+## currency (round it first); `bug` when `n` is not a positive Int or `m` is not
+## an amount.
+##
+## example:
+##   map(money.split(money.parse("0.10", "USD"), 3), money.to_string)   # 0.04, 0.03, 0.03
 export fn split(m, n) {
-    unless n > 0 { fail("cannot split into {n} parts") }
-    allocate(m, map(range(0, n), fn(_) 1))
+    check(m, "split")
+    unless type_of(n) == "int" and n > 0 { bug("money.split: n must be a positive Int, got {n}") }
+    share_out(m, map(range(0, n), fn(_) 1), "split")
 }
 
-## Divide by ratio, in the currency's smallest unit, so nothing is lost.
+## Shares by ratio, in the currency's smallest unit, that sum back exactly.
 ##
-## The remainder is handed out one minor unit at a time from the first share
-## onward, rather than rounded away. Allocating $0.05 as 3:7 gives 0.02 and
-## 0.03: the shares are as close to the ratio as whole cents allow, and they
-## still sum to five cents.
+## Each share gets the whole minor units its ratio earns; the units left over
+## go one at a time to the shares with the largest remainders (ties to the
+## earlier share). So 59.97 as 3:7 is 17.99 and 41.98, and a zero ratio never
+## receives anything. Ratios are non-negative Ints or Decimals. A negative
+## amount allocates like its positive, sign carried through, so a refund
+## splits like the charge it reverses.
 ##
-## A negative amount allocates the same way with the sign carried through, so
-## a refund splits like the charge it reverses.
+## errors: `money`/`too_precise` when the amount has more places than its
+## currency (round it first); `bug` when `ratios` is not a non-empty list of
+## non-negative Ints or Decimals that sum above zero, or `m` is not an amount.
+##
+## example:
+##   map(money.allocate(money.parse("59.97", "USD"), [3, 7]), money.to_string)   # 17.99, 41.98
 export fn allocate(m, ratios) {
-    unless len(ratios) > 0 { fail("allocate needs at least one ratio") }
-    total_ratio = reduce(ratios, fn(acc, r) acc + r, 0)
-    unless total_ratio > 0 { fail("allocate needs the ratios to sum above zero") }
+    check(m, "allocate")
+    valid = type_of(ratios) == "list" and
+        len(ratios) > 0 and
+        all(ratios, fn(r) exact_number(r) and r >= 0) and
+        reduce(ratios, fn(acc, r) acc + r, 0) > 0
+    unless valid {
+        floats = type_of(ratios) == "list" and any(ratios, fn(r) type_of(r) == "float")
+        hint = if floats { " - write Decimals such as 0.3m, not floats" } else { "" }
+        bug(
+            "money.allocate: ratios must be a non-empty list of non-negative Ints or Decimals that sum above zero, got {ratios}{hint}",
+        )
+    }
+    share_out(m, ratios, "allocate")
+}
 
+# Largest-remainder allocation over minor units.
+fn share_out(m, ratios, fname) {
+    places = MINOR_UNITS[m.currency]
+    scaled = m.amount * decimal(pow(10, places))
+    if scaled != decimal(round(scaled)) {
+        fail(
+            "too_precise",
+            "money.{fname}: {m.amount} {m.currency} has more decimal places than {m.currency} allows ({places}) - round it first with money.of(m.amount, m.currency, rounding: true)",
+        )
+    }
     negative = m.amount < decimal(0)
-    units = to_minor(abs_of(m))
+    units = abs(round(scaled))
+    total = reduce(ratios, fn(acc, r) acc + r, 0)
 
-    # Floor each share, then distribute what floor left behind.
+    # Each share's whole units, and what the floor left behind.
     mut shares = []
+    mut rems = []
     mut allocated = 0
     for r in ratios {
-        share = units * r // total_ratio
+        num = units * r
+        rem = num % total
+        share = round((num - rem) // total)
         shares = push(shares, share)
+        rems = push(rems, decimal(rem))
         allocated = allocated + share
     }
-    mut remainder = units - allocated
-    mut i = 0
-    while remainder > 0 {
+    # Fewer units are left than there are shares; the largest remainders get
+    # one each. `sort_by` is stable, so ties go to the earlier share.
+    order = sort_by(range(0, len(ratios)), fn(i) decimal(0) - rems[i])
+    for k in range(0, units - allocated) {
+        i = order[k]
         shares = set(shares, i, shares[i] + 1)
-        remainder = remainder - 1
-        i = (i + 1) % len(shares)
     }
-    map(shares, fn(s) from_minor(if negative { 0 - s } else { s }, m.currency))
+    scale = decimal(pow(10, places))
+    map(shares, fn(s) {
+        amount = decimal(s) / scale
+        { amount: if negative { decimal(0) - amount } else { amount }, currency: m.currency }
+    })
 }
 
 # --- rendering -----------------------------------------------------------------
 
-## "10.50 USD", with the number of decimals the currency actually uses: yen
-## render whole, dinar to three places.
+## The amount as text with the number of decimals the currency uses: yen render
+## whole, dinar to three places, and extra places from `mul` round half away
+## from zero, in decimal.
+##
+## errors: `bug` when `m` is not an amount.
+##
+## example:
+##   money.to_string(money.parse("10.5", "USD"))   # "10.50 USD"
 export fn to_string(m) {
-    # `fmt.fixed` renders the exact number of decimals the currency uses and
-    # rounds in decimal, so yen come out whole and dinar to three places
-    # without any digit work here.
-    fmt.fixed(m.amount, minor_units(m.currency)) + " " + m.currency
+    check(m, "to_string")
+    fmt.fixed(m.amount, MINOR_UNITS[m.currency]) + " " + m.currency
 }

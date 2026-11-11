@@ -131,13 +131,113 @@ test.case("splitting a negative amount still sums back", fn() {
     test.ok(m.eq(m.sum(parts, "USD"), total), "negative sums back exactly")
 })
 
-test.case("invalid splits are rejected", fn() {
-    test.eq(try { m.split(m.parse("1.00", "USD"), 0) } catch (e) { get(e, "kind") }, "money")
-    test.eq(try { m.allocate(m.parse("1.00", "USD"), []) } catch (e) { get(e, "kind") }, "money")
+fn err_of(f) = try {
+    f()
+    null
+} catch (e) { [get(e, "kind"), get(e, "reason")] }
+
+fn message_of(f) = try {
+    f()
+    ""
+} catch (e) { get(e, "message") }
+
+test.case("invalid splits are a programmer mistake, refused at the call", fn() {
+    one = m.parse("1.00", "USD")
+    test.eq(err_of(fn() m.split(one, 0)), ["bug", "bad_argument"])
+    test.eq(err_of(fn() m.split(one, 1.5)), ["bug", "bad_argument"])
+    test.eq(err_of(fn() m.allocate(one, [])), ["bug", "bad_argument"])
+    test.eq(err_of(fn() m.allocate(one, [0, 0])), ["bug", "bad_argument"])
+    test.eq(err_of(fn() m.allocate(one, "12")), ["bug", "bad_argument"])
+})
+
+test.case("allocate refuses a negative ratio instead of inventing money", fn() {
+    one = m.parse("1.00", "USD")
+    test.eq(err_of(fn() m.allocate(one, [2, -1])), ["bug", "bad_argument"])
+    msg = message_of(fn() m.allocate(one, [2, -1]))
+    test.ok(contains(msg, "money.allocate"), "names the function: {msg}")
+    test.ok(contains(msg, "[2, -1]"), "shows the ratios: {msg}")
+})
+
+test.case("allocate refuses a float ratio with a clear message", fn() {
+    one = m.parse("1.00", "USD")
+    test.eq(err_of(fn() m.allocate(one, [0.3, 0.7])), ["bug", "bad_argument"])
+    test.ok(contains(message_of(fn() m.allocate(one, [0.3, 0.7])), "money.allocate"), "names it")
+})
+
+test.case("allocate takes Decimal ratios", fn() {
+    parts = m.allocate(m.parse("1.00", "USD"), [0.3m, 0.7m])
+    test.eq(map(parts, m.to_string), ["0.30 USD", "0.70 USD"])
+    parts2 = m.allocate(m.parse("0.10", "USD"), [0.5m, 0.25m, 0.25m])
+    test.eq(map(parts2, m.to_string), ["0.05 USD", "0.03 USD", "0.02 USD"])
+})
+
+test.case("allocate hands the remainder to the largest remainders", fn() {
+    usd = fn(s) m.parse(s, "USD")
+    test.eq(map(m.allocate(usd("59.97"), [3, 7]), m.to_string), ["17.99 USD", "41.98 USD"])
+    test.eq(map(m.allocate(usd("0.03"), [1, 100]), m.to_string), ["0.00 USD", "0.03 USD"])
     test.eq(
-        try { m.allocate(m.parse("1.00", "USD"), [0, 0]) } catch (e) { get(e, "kind") },
-        "money",
+        map(m.allocate(usd("0.05"), [0, 1, 1]), m.to_string),
+        ["0.00 USD", "0.03 USD", "0.02 USD"],
     )
+    # A negative amount allocates like its positive, sign carried through.
+    test.eq(map(m.allocate(usd("-59.97"), [3, 7]), m.to_string), ["-17.99 USD", "-41.98 USD"])
+})
+
+test.case("a zero ratio never receives money", fn() {
+    for amount in ["0.01", "0.05", "0.99", "10.07"] {
+        parts = m.allocate(m.parse(amount, "USD"), [0, 1, 1, 0, 3])
+        test.ok(m.is_zero(parts[0]), "{amount}: first zero share")
+        test.ok(m.is_zero(parts[3]), "{amount}: fourth zero share")
+        test.ok(m.eq(m.sum(parts, "USD"), m.parse(amount, "USD")), "{amount} sums back")
+    }
+})
+
+test.case("split and allocate refuse an amount finer than the currency", fn() {
+    fine = m.mul(m.parse("0.10", "USD"), decimal("0.333"))
+    test.eq(err_of(fn() m.split(fine, 3)), ["money", "too_precise"])
+    test.eq(
+        err_of(fn() m.allocate(m.mul(m.parse("0.01", "USD"), 0.5m), [1, 1])),
+        ["money", "too_precise"],
+    )
+    test.ok(contains(message_of(fn() m.split(fine, 3)), "rounding: true"), "says how to round")
+})
+
+test.case("an amount that is not one is refused, not computed on", fn() {
+    usd = m.parse("1.00", "USD")
+    test.eq(err_of(fn() m.add({ amount: 1, currency: "USD" }, usd)), ["bug", "bad_argument"])
+    test.eq(err_of(fn() m.add(usd, 5)), ["bug", "bad_argument"])
+    test.eq(err_of(fn() m.to_string(null)), ["bug", "bad_argument"])
+    test.ok(contains(message_of(fn() m.add(usd, 5)), "money.add"), "names the function")
+})
+
+test.case("mul refuses a float factor with a clear message", fn() {
+    usd = m.parse("1.00", "USD")
+    test.eq(err_of(fn() m.mul(usd, 0.1)), ["bug", "bad_argument"])
+    test.ok(contains(message_of(fn() m.mul(usd, 0.1)), "money.mul"), "names the function")
+    test.eq(m.to_string(m.mul(usd, 0.1m)), "0.10 USD")
+})
+
+test.case("of refuses a float amount and from_minor a non-integer", fn() {
+    test.eq(err_of(fn() m.of(0.1, "USD")), ["bug", "bad_argument"])
+    test.eq(err_of(fn() m.from_minor(10.5, "USD")), ["bug", "bad_argument"])
+    test.eq(err_of(fn() m.sum("abc", "USD")), ["bug", "bad_argument"])
+})
+
+test.case("errors carry a stable reason", fn() {
+    usd = m.parse("1.00", "USD")
+    test.eq(err_of(fn() m.parse("1.00", "US")), ["money", "bad_currency"])
+    test.eq(err_of(fn() m.parse("1.00", "ABC")), ["money", "unknown_currency"])
+    test.eq(err_of(fn() m.add(usd, m.parse("1.00", "EUR"))), ["money", "currency_mismatch"])
+    test.eq(err_of(fn() m.parse("12.345", "USD")), ["money", "too_precise"])
+    test.eq(err_of(fn() m.parse("abc", "USD")), ["money", "bad_amount"])
+})
+
+test.case("zero and normalize_code", fn() {
+    test.eq(m.to_string(m.zero("jpy")), "0 JPY")
+    test.ok(m.is_zero(m.zero("USD")), "zero is zero")
+    test.eq(m.normalize_code("eur"), "EUR")
+    test.eq(err_of(fn() m.normalize_code("EURO")), ["money", "bad_currency"])
+    test.eq(get(m.minor_unit_table(), "KWD"), 3)
 })
 
 # --- sum ----------------------------------------------------------------------
